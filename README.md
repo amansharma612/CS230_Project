@@ -1,4 +1,5 @@
-Running Instructions.
+Running Instructions:
+
 The folder sizes has the different cache.h files for different sizes of the cache.
 To use these, replace the cache.h file from the inc folder in champsim by the file in sizes folder which correspond to the size you want to implement and rename it.
 
