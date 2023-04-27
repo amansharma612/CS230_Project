@@ -1,0 +1,479 @@
+
+#include<iostream>
+#include<tuple> 
+#include<vector>
+#include <random>
+#include <time.h>
+#include <cstdlib>
+
+#include "cache.h"
+
+# define EPSILON 0.1
+# define ALPHA 0.2
+# define GAMMA 0.9
+
+int oldCacheOffset = 0;
+int netReward = 0;
+int count = 0;
+
+int offset_max = 63;
+int age_since_last_access_max = 0, age_since_insertion_max = 0;
+int RFO_access_count_MAX = 0, WB_access_count_MAX = 0, PF_access_count_MAX = 0, LOAD_access_count_MAX = 0;
+int recency_MAX = 0, preuse_MAX = 0;
+
+
+struct Set_Information {
+    int Set_Number;
+    uint64_t Set_Accesses;
+    int Set_Accesses_since_Last_Miss;
+    
+};
+
+struct Current_Access_Info {
+    int offset, is_RFO, is_WB, is_LOAD, is_PF;
+};
+
+struct Cache_Line_Info {
+    int offset;
+    int age_since_last_access, age_since_insertion;
+    int last_access_was_RFO, last_access_was_WB, last_access_was_PF, last_access_was_LOAD;
+    uint64_t RFO_access_count, WB_access_count, PF_access_count, LOAD_access_count;
+    int hits_since_insertion;
+    int recency;
+    int preuse;
+    int is_dirty, is_valid;
+    
+    
+};
+
+struct StateVector {
+    struct Set_Information Accessed_Set_Info;
+    struct Current_Access_Info Current_Accessed_Info;
+    struct Cache_Line_Info Current_Accessed_Line_Info;
+};
+
+struct StateVector stateVector;
+struct StateVector prevStateVector = {{0, 0, 0}, {0, 0, 0, 0, 0}, {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}};
+
+
+
+
+// 24 features of state
+
+double FeatureWeight[24];
+
+Set_Information* Set_Info = new Set_Information[LLC_SET];
+
+// Access each element as Lines_Info + LLC_WAY*Set + Way
+Cache_Line_Info* Lines_Info = new Cache_Line_Info[LLC_SET*LLC_WAY];
+
+// Store Current Access Information
+Current_Access_Info Current_Access_Inf = {0,0,0,0,0}; 
+
+
+
+uint64_t value_of_line(int set, int way){
+    
+
+    return    FeatureWeight[0]*Lines_Info[set*LLC_WAY + way].offset 
+            + FeatureWeight[1]*Lines_Info[set*LLC_WAY + way].age_since_last_access 
+            + FeatureWeight[2]*Lines_Info[set*LLC_WAY + way].age_since_insertion 
+            + FeatureWeight[3]*Lines_Info[set*LLC_WAY + way].last_access_was_RFO 
+            + FeatureWeight[4]*Lines_Info[set*LLC_WAY + way].last_access_was_WB 
+            + FeatureWeight[5]*Lines_Info[set*LLC_WAY + way].last_access_was_PF 
+            + FeatureWeight[6]*Lines_Info[set*LLC_WAY + way].last_access_was_LOAD 
+            + FeatureWeight[7]*Lines_Info[set*LLC_WAY + way].RFO_access_count 
+            + FeatureWeight[8]*Lines_Info[set*LLC_WAY + way].WB_access_count 
+            + FeatureWeight[9]*Lines_Info[set*LLC_WAY + way].PF_access_count 
+            + FeatureWeight[10]*Lines_Info[set*LLC_WAY + way].LOAD_access_count 
+            + FeatureWeight[11]*Lines_Info[set*LLC_WAY + way].hits_since_insertion 
+            + FeatureWeight[12]*Lines_Info[set*LLC_WAY + way].recency 
+            + FeatureWeight[13]*Lines_Info[set*LLC_WAY + way].preuse 
+            + FeatureWeight[14]*Set_Info[set].Set_Number 
+            + FeatureWeight[15]*Set_Info[set].Set_Accesses 
+            + FeatureWeight[16]*Set_Info[set].Set_Accesses_since_Last_Miss 
+            + FeatureWeight[17]*Current_Access_Inf.offset
+            + FeatureWeight[18]*Current_Access_Inf.is_RFO
+            + FeatureWeight[19]*Current_Access_Inf.is_WB
+            + FeatureWeight[20]*Current_Access_Inf.is_LOAD
+            + FeatureWeight[21]*Current_Access_Inf.is_PF
+            + FeatureWeight[22]*Lines_Info[set*LLC_WAY + way].is_dirty
+            + FeatureWeight[23]*Lines_Info[set*LLC_WAY + way].is_valid;
+}
+
+uint64_t value_of_State(struct StateVector stateVector){
+    return FeatureWeight[0]*(stateVector.Current_Accessed_Line_Info.offset)
+        +  FeatureWeight[1]*(stateVector.Current_Accessed_Line_Info.age_since_last_access)
+        +  FeatureWeight[2]*(stateVector.Current_Accessed_Line_Info.age_since_insertion)
+        +  FeatureWeight[3]*(stateVector.Current_Accessed_Line_Info.last_access_was_RFO)
+        +  FeatureWeight[4]*(stateVector.Current_Accessed_Line_Info.last_access_was_WB)
+        +  FeatureWeight[5]*(stateVector.Current_Accessed_Line_Info.last_access_was_PF)
+        +  FeatureWeight[6]*(stateVector.Current_Accessed_Line_Info.last_access_was_LOAD)
+        +  FeatureWeight[7]*(stateVector.Current_Accessed_Line_Info.RFO_access_count)
+        +  FeatureWeight[8]*(stateVector.Current_Accessed_Line_Info.WB_access_count)
+        +  FeatureWeight[9]*(stateVector.Current_Accessed_Line_Info.PF_access_count)
+        +  FeatureWeight[10]*(stateVector.Current_Accessed_Line_Info.LOAD_access_count)
+        +  FeatureWeight[11]*(stateVector.Current_Accessed_Line_Info.hits_since_insertion)
+        +  FeatureWeight[12]*(stateVector.Current_Accessed_Line_Info.recency)
+        +  FeatureWeight[13]*(stateVector.Current_Accessed_Line_Info.preuse)
+        +  FeatureWeight[14]*(stateVector.Accessed_Set_Info.Set_Number)
+        +  FeatureWeight[15]*(stateVector.Accessed_Set_Info.Set_Accesses)
+        +  FeatureWeight[16]*(stateVector.Accessed_Set_Info.Set_Accesses_since_Last_Miss)
+        +  FeatureWeight[17]*(stateVector.Current_Accessed_Info.offset)
+        +  FeatureWeight[18]*(stateVector.Current_Accessed_Info.is_RFO)
+        +  FeatureWeight[19]*(stateVector.Current_Accessed_Info.is_WB)
+        +  FeatureWeight[20]*(stateVector.Current_Accessed_Info.is_LOAD)
+        +  FeatureWeight[21]*(stateVector.Current_Accessed_Info.is_PF)
+        +  FeatureWeight[22]*(stateVector.Current_Accessed_Line_Info.is_dirty)
+        +  FeatureWeight[23]*(stateVector.Current_Accessed_Line_Info.is_valid);
+}
+
+
+
+
+
+// initialize replacement state
+void CACHE::llc_initialize_replacement()
+{
+    for (int i = 0; i < LLC_SET*LLC_WAY; i++){
+        Lines_Info[i].offset = 0;
+        Lines_Info[i].age_since_insertion = 0;
+        Lines_Info[i].age_since_last_access = 0;
+        Lines_Info[i].last_access_was_RFO = 0;
+        Lines_Info[i].last_access_was_WB = 0;
+        Lines_Info[i].last_access_was_PF = 0;
+        Lines_Info[i].last_access_was_LOAD = 0;
+        Lines_Info[i].RFO_access_count = 0;
+        Lines_Info[i].WB_access_count = 0;
+        Lines_Info[i].PF_access_count = 0;
+        Lines_Info[i].LOAD_access_count = 0;
+        Lines_Info[i].hits_since_insertion = 0;
+        Lines_Info[i].recency = 0;
+        Lines_Info[i].preuse = 0;
+        Lines_Info[i].is_dirty = 0;
+        Lines_Info[i].is_valid = 0;
+        
+    }
+    for (int i = 0; i < LLC_SET; i++){
+        Set_Info[i].Set_Number = i;
+        Set_Info[i].Set_Accesses = 0;
+        Set_Info[i].Set_Accesses_since_Last_Miss = 0;
+        
+    }
+
+    for (int i = 0; i < 15; i++){
+        FeatureWeight[i] = 1;
+    }
+}
+
+// find replacement victim
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
+{
+    
+    uint32_t way = 0;
+    uint64_t maxVal = INT64_MIN;
+
+    // fill invalid line first
+    for (int way1=0; way1<NUM_WAY; way1++) {
+        if (block[set][way1].valid == false) {
+
+            DP ( if (warmup_complete[cpu]) {
+            cout << "[" << NAME << "] " << __func__ << " instr_id: " << instr_id << " invalid set: " << set << " way: " << way1;
+            cout << hex << " address: " << (full_addr>>LOG2_BLOCK_SIZE) << " victim address: " << block[set][way1].address << " data: " << block[set][way1].data;
+            cout << dec << " lru: " << block[set][way1].lru << endl; });
+
+            return way1;
+        }
+    }
+    // with epsilon probability, choose a random line
+    // generate a random number between 0 and 1 
+    double random = (double)rand() / (double)RAND_MAX;
+    if (random < EPSILON){
+        way = rand() % NUM_WAY;
+        
+    }
+    else{
+        for (int w=0; w<NUM_WAY; w++) {
+            if (block[set][way].valid == true) {
+                // Lines_Info[set*LLC_WAY +way].is_valid = block[set][way].valid;
+                // Lines_Info[set*LLC_WAY +way].is_dirty = block[set][way].dirty;
+                int64_t value = value_of_line(set, way);
+                if (value > maxVal){
+                    maxVal = value;
+                    way = w;
+                }
+            }
+        }
+    }
+    // oldCacheOffset is last 6 bits of the address which is about to be evicted
+    oldCacheOffset = block[set][way].address & 0x3F;
+    if (way == LLC_WAY) assert("MAJOR ISSUE");
+    return way;
+     
+}
+
+// called on every cache hit and cache fill
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{   
+
+    prevStateVector = stateVector;
+
+    if (age_since_last_access_max < Lines_Info[set*LLC_WAY + way].age_since_last_access) age_since_last_access_max = Lines_Info[set*LLC_WAY + way].age_since_last_access;
+    if (age_since_insertion_max < Lines_Info[set*LLC_WAY + way].age_since_insertion) age_since_insertion_max = Lines_Info[set*LLC_WAY + way].age_since_insertion;
+    if (RFO_access_count_MAX < Lines_Info[set*LLC_WAY + way].RFO_access_count) RFO_access_count_MAX = Lines_Info[set*LLC_WAY + way].RFO_access_count;
+    if (PF_access_count_MAX < Lines_Info[set*LLC_WAY + way].PF_access_count) PF_access_count_MAX = Lines_Info[set*LLC_WAY + way].PF_access_count;
+    if (WB_access_count_MAX < Lines_Info[set*LLC_WAY + way].WB_access_count) WB_access_count_MAX = Lines_Info[set*LLC_WAY + way].WB_access_count;
+    if (LOAD_access_count_MAX < Lines_Info[set*LLC_WAY + way].LOAD_access_count) LOAD_access_count_MAX = Lines_Info[set*LLC_WAY + way].LOAD_access_count;
+    if (recency_MAX < Lines_Info[set*LLC_WAY + way].recency ) recency_MAX = Lines_Info[set*LLC_WAY + way].recency;
+    if (preuse_MAX < Lines_Info[set*LLC_WAY + way].preuse) preuse_MAX = Lines_Info[set*LLC_WAY + way].preuse;
+    
+
+
+    string TYPE_NAME;
+    if (type == LOAD){
+        TYPE_NAME = "LOAD";
+        Lines_Info[set*LLC_WAY + way].LOAD_access_count++;
+    }
+    else if (type == RFO){
+        TYPE_NAME = "RFO";
+        Lines_Info[set*LLC_WAY + way].RFO_access_count++;
+    }
+        
+    else if (type == PREFETCH){
+        TYPE_NAME = "PF";
+        Lines_Info[set*LLC_WAY + way].PF_access_count++;
+    }
+    else if (type == WRITEBACK){
+        TYPE_NAME = "WB";
+        Lines_Info[set*LLC_WAY + way].WB_access_count++;
+    }
+    else
+        assert(0);
+
+    if (hit)
+        TYPE_NAME += "_HIT";
+    else
+        TYPE_NAME += "_MISS";
+
+    // Count another access to the set
+    Set_Info[set].Set_Accesses++;
+
+    if (type == LOAD){
+            Current_Access_Inf.is_LOAD = 1;
+            Current_Access_Inf.is_RFO = 0;
+            Current_Access_Inf.is_WB = 0;
+            Current_Access_Inf.is_PF = 0;
+        }
+        else if (type == RFO){
+            Current_Access_Inf.is_LOAD = 0;
+            Current_Access_Inf.is_RFO = 1;
+            Current_Access_Inf.is_WB = 0;
+            Current_Access_Inf.is_PF = 0;
+        }
+        else if (type == WRITEBACK){
+            Current_Access_Inf.is_LOAD = 0;
+            Current_Access_Inf.is_RFO = 0;
+            Current_Access_Inf.is_WB = 1;
+            Current_Access_Inf.is_PF = 0;
+
+        }
+        else if (type == PREFETCH){
+            Current_Access_Inf.is_LOAD = 0;
+            Current_Access_Inf.is_RFO = 0;
+            Current_Access_Inf.is_WB = 0;
+            Current_Access_Inf.is_PF = 1;
+        }
+        else
+            assert(0);
+        
+    Lines_Info[set*LLC_WAY + way].is_dirty = block[set][way].dirty;
+    Lines_Info[set*LLC_WAY + way].is_valid = block[set][way].valid;
+
+    // Offset is lower 6 bits of address
+    Lines_Info[set*LLC_WAY + way].offset = full_addr & 0x3F;
+
+    if (hit){
+        // Count another access to the set since the last miss
+        Set_Info[set].Set_Accesses_since_Last_Miss++;
+        Lines_Info[set*LLC_WAY + way].hits_since_insertion++;
+
+
+    }
+    else{
+        // Reset the counter of accesses to the set since the last miss
+        Set_Info[set].Set_Accesses_since_Last_Miss = 0;
+        Lines_Info[set*LLC_WAY + way].hits_since_insertion = 0;
+        
+
+
+    }
+
+    // Update the state vector
+    stateVector.Accessed_Set_Info = Set_Info[set];
+    stateVector.Current_Accessed_Line_Info = Lines_Info[set*LLC_WAY + way];
+    stateVector.Current_Accessed_Info = Current_Access_Inf;
+
+    // A reward function. 
+    // Misses incur a penalty inversely proportional to the number of accesses to the set since the last miss
+    // Hits incur a reward proportional to the number of accesses to the set since the last miss
+    int reward;
+    if (hit){
+        reward = 1.0 * (Set_Info[set].Set_Accesses_since_Last_Miss + 1);
+    }
+    else{
+        reward = -100 / (Set_Info[set].Set_Accesses_since_Last_Miss + 1);
+    }
+
+    netReward += reward;
+
+    // Update FeatureWeights with a gradient descent step
+    double delta = reward + GAMMA* value_of_State(stateVector) - value_of_State(prevStateVector);
+    
+    // Update the weights in the same oder as the value_of_State function
+    FeatureWeight[0] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.offset;
+    FeatureWeight[1] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.age_since_last_access/300000;
+    FeatureWeight[2] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.age_since_insertion/300000;
+    FeatureWeight[3] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.last_access_was_RFO;
+    FeatureWeight[4] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.last_access_was_WB;
+    FeatureWeight[5] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.last_access_was_PF;
+    FeatureWeight[6] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.last_access_was_LOAD;
+    FeatureWeight[7] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.RFO_access_count/5000;
+    FeatureWeight[8] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.WB_access_count/5000;
+    FeatureWeight[9] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.PF_access_count/5000;
+    FeatureWeight[10] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.LOAD_access_count/5000;
+    FeatureWeight[11] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.hits_since_insertion;
+    FeatureWeight[12] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.recency/5000;
+    FeatureWeight[13] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.preuse/1000;
+    FeatureWeight[14] += ALPHA * delta * stateVector.Accessed_Set_Info.Set_Number;
+    FeatureWeight[15] += ALPHA * delta * stateVector.Accessed_Set_Info.Set_Accesses;
+    FeatureWeight[16] += ALPHA * delta * stateVector.Accessed_Set_Info.Set_Accesses_since_Last_Miss;
+    FeatureWeight[17] += ALPHA * delta * stateVector.Current_Accessed_Info.offset;
+    FeatureWeight[18] += ALPHA * delta * stateVector.Current_Accessed_Info.is_RFO;
+    FeatureWeight[19] += ALPHA * delta * stateVector.Current_Accessed_Info.is_WB;
+    FeatureWeight[20] += ALPHA * delta * stateVector.Current_Accessed_Info.is_LOAD;
+    FeatureWeight[21] += ALPHA * delta * stateVector.Current_Accessed_Info.is_PF;
+    FeatureWeight[22] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.is_dirty;
+    FeatureWeight[23] += ALPHA * delta * stateVector.Current_Accessed_Line_Info.is_valid;
+
+    // Normalize the weights to be between 0 and 1
+    double sum = 0;
+    for (int i = 0; i < 24; i++){
+        sum += FeatureWeight[i];
+    }
+    for (int i = 0; i < 24; i++){
+        FeatureWeight[i] /= sum;
+    }
+
+    
+
+
+
+    // Update other stuff
+    
+    // recency is made 0 for this accessed line
+    Lines_Info[set*LLC_WAY + way].recency = 0;
+    // recency is incremented for all other lines in the set
+    for (uint32_t i = 0; i < LLC_WAY; i++){
+        if (i != way){
+            Lines_Info[set*LLC_WAY + i].recency++;
+        }
+    }
+
+    // Update last access info
+    Lines_Info[set*LLC_WAY + way].last_access_was_LOAD = Current_Access_Inf.is_LOAD;
+    Lines_Info[set*LLC_WAY + way].last_access_was_RFO = Current_Access_Inf.is_RFO;
+    Lines_Info[set*LLC_WAY + way].last_access_was_WB = Current_Access_Inf.is_WB;
+    Lines_Info[set*LLC_WAY + way].last_access_was_PF = Current_Access_Inf.is_PF;
+
+
+    if (hit){
+        // zero age since last access
+        Lines_Info[set*LLC_WAY + way].age_since_last_access = 0;
+        
+        // Update age since insertion
+        Lines_Info[set*LLC_WAY + way].age_since_insertion++;
+    }
+    else{
+        // increment age since last access
+        Lines_Info[set*LLC_WAY + way].age_since_last_access = 0;
+    
+        // Update age since insertion
+        Lines_Info[set*LLC_WAY + way].age_since_insertion = 0;
+    }
+    // Increment age since last access of all other lines in all sets
+    for (uint32_t i = 0; i < LLC_SET; i++){
+        for (uint32_t j = 0; j < LLC_WAY; j++){
+            if (i != set || j != way){
+                Lines_Info[i*LLC_WAY + j].age_since_last_access++;
+                Lines_Info[i*LLC_WAY + j].age_since_insertion++;
+            }
+        }
+    }
+
+    if (type == LOAD){
+            Lines_Info[set*LLC_WAY + way].last_access_was_LOAD = 1;
+            Lines_Info[set*LLC_WAY + way].last_access_was_RFO = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_WB = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_PF = 0;
+            Lines_Info[set*LLC_WAY + way].LOAD_access_count++;
+        }
+        else if (type == RFO){
+            Lines_Info[set*LLC_WAY + way].last_access_was_LOAD = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_RFO = 1;
+            Lines_Info[set*LLC_WAY + way].last_access_was_WB = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_PF = 0;
+            Lines_Info[set*LLC_WAY + way].RFO_access_count++;
+        }
+        else if (type == WRITEBACK){
+            Lines_Info[set*LLC_WAY + way].last_access_was_LOAD = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_RFO = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_WB = 1;
+            Lines_Info[set*LLC_WAY + way].last_access_was_PF = 0;
+            Lines_Info[set*LLC_WAY + way].WB_access_count++;
+            
+        }
+        else if (type == PREFETCH){
+            Lines_Info[set*LLC_WAY + way].last_access_was_LOAD = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_RFO = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_WB = 0;
+            Lines_Info[set*LLC_WAY + way].last_access_was_PF = 1;
+            Lines_Info[set*LLC_WAY + way].PF_access_count++;
+            
+        }
+        else
+            assert(0);
+    
+
+    // Update last access offset
+    Lines_Info[set*LLC_WAY + way].offset = full_addr & 0x3F;
+
+    // Update preuse
+    if (hit){
+        // for all ways in the set increment preuse
+        for (uint32_t i = 0; i < LLC_WAY; i++){
+            Lines_Info[set*LLC_WAY + i].preuse++;
+        }
+    }
+    else{
+        // reset the preuse of the accessed line
+        Lines_Info[set*LLC_WAY + way].preuse = 0;
+    }
+    
+
+    //###############################################################################
+    // May print stats here
+
+    
+    //###############################################################################
+
+
+    
+
+    
+}
+
+void CACHE::llc_replacement_final_stats()
+{
+ // HALLO
+ 
+}
